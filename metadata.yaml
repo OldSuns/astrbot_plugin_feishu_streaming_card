@@ -1,0 +1,9 @@
+name: astrbot_plugin_feishu_streaming_card
+display_name: 飞书流式卡片增强
+desc: 将 LLM 流式输出渲染为持续更新的飞书卡片，展示思考过程、工具调用和统计信息
+version: v0.1.0
+author: AstrBot Contributors
+repo: https://github.com/astrbot/astrbot_plugin_feishu_streaming_card
+astrbot_version: ">=4.15,<5"
+support_platforms:
+  - lark

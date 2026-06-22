@@ -1,0 +1,62 @@
+{
+  "enabled": {
+    "title": "启用流式卡片",
+    "type": "boolean",
+    "default": true,
+    "description": "是否启用飞书流式卡片增强功能"
+  },
+  "update_interval": {
+    "title": "更新间隔（秒）",
+    "type": "number",
+    "default": 0.2,
+    "minimum": 0.1,
+    "maximum": 2.0,
+    "description": "卡片更新的最小时间间隔，避免频繁调用飞书 API"
+  },
+  "show_thinking": {
+    "title": "显示思考过程",
+    "type": "boolean",
+    "default": true,
+    "description": "是否在卡片中显示 LLM 的思考过程"
+  },
+  "show_tools": {
+    "title": "显示工具调用",
+    "type": "boolean",
+    "default": true,
+    "description": "是否在卡片中显示工具调用历史"
+  },
+  "show_footer": {
+    "title": "显示统计信息",
+    "type": "boolean",
+    "default": true,
+    "description": "是否显示耗时、模型、token 等统计信息"
+  },
+  "max_sessions": {
+    "title": "最大会话数",
+    "type": "integer",
+    "default": 100,
+    "minimum": 10,
+    "maximum": 1000,
+    "description": "内存中保持的最大会话数，超过后自动清理最旧的会话"
+  },
+  "session_ttl": {
+    "title": "会话超时时间（秒）",
+    "type": "integer",
+    "default": 3600,
+    "minimum": 300,
+    "maximum": 86400,
+    "description": "会话在内存中保持的最长时间，超时后自动清理"
+  },
+  "force_patch": {
+    "title": "强制安装 Patch",
+    "type": "boolean",
+    "default": false,
+    "description": "即使检测到冲突也强制安装 Monkey Patch（慎用）"
+  },
+  "debug_mode": {
+    "title": "调试模式",
+    "type": "boolean",
+    "default": false,
+    "description": "开启后会输出详细的调试日志"
+  }
+}
