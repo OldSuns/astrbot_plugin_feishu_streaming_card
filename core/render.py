@@ -87,8 +87,8 @@ def render_card(
             }
         })
 
-    # 工具调用历史（完成状态且有工具调用）
-    if show_tools and session.is_terminal and session.has_tools:
+    # 工具调用历史
+    if show_tools and session.has_tools:
         card["body"]["elements"].append({
             "tag": "hr"
         })

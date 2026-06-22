@@ -16,6 +16,25 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api import logger
 
+
+def _optional_hook(name: str):
+    """兼容不同 AstrBot 版本的可选生命周期钩子。"""
+    factory = getattr(filter, name, None)
+    if callable(factory):
+        return factory()
+
+    def decorator(func):
+        return func
+
+    return decorator
+
+
+class _NoopRateLimiter:
+    """兼容旧测试/外部访问；主链路不再使用节流。"""
+
+    async def should_update(self, key: str) -> bool:
+        return True
+
 try:
     # AstrBot 正常按插件包加载时走这里，模块名形如：
     # astrbot_plugin_feishu_streaming_card.core.patch
@@ -27,7 +46,17 @@ try:
         render_card,
         StreamingTextNormalizer,
         StreamingPatch,
-        RateLimiter,
+        apply_stats,
+        build_streaming_card,
+        chunk_to_text,
+        current_provider_model,
+        extract_stats_payload,
+        normalize_tool_args,
+        provider_model_name,
+        tool_name,
+        install_lifecycle_hook_passthrough,
+        uninstall_lifecycle_hook_passthrough,
+        wrap_native_lark_methods,
     )
 except ImportError:
     # 兼容 AstrBot 或本地测试通过文件方式加载 main.py 的场景。
@@ -54,14 +83,24 @@ except ImportError:
     render_card = _core_module.render_card
     StreamingTextNormalizer = _core_module.StreamingTextNormalizer
     StreamingPatch = _core_module.StreamingPatch
-    RateLimiter = _core_module.RateLimiter
+    apply_stats = _core_module.apply_stats
+    build_streaming_card = _core_module.build_streaming_card
+    chunk_to_text = _core_module.chunk_to_text
+    current_provider_model = _core_module.current_provider_model
+    extract_stats_payload = _core_module.extract_stats_payload
+    normalize_tool_args = _core_module.normalize_tool_args
+    provider_model_name = _core_module.provider_model_name
+    tool_name = _core_module.tool_name
+    install_lifecycle_hook_passthrough = _core_module.install_lifecycle_hook_passthrough
+    uninstall_lifecycle_hook_passthrough = _core_module.uninstall_lifecycle_hook_passthrough
+    wrap_native_lark_methods = _core_module.wrap_native_lark_methods
 
 
 @register(
     "astrbot_plugin_feishu_streaming_card",
     "AstrBot Contributors",
     "将 LLM 流式输出渲染为持续更新的飞书卡片",
-    "v0.1.0"
+    "v0.2.0"
 )
 class FeishuStreamingCardPlugin(Star):
     """飞书流式卡片插件"""
@@ -75,9 +114,9 @@ class FeishuStreamingCardPlugin(Star):
             max_sessions=self.config.get("max_sessions", 100),
             ttl=self.config.get("session_ttl", 3600)
         )
-        self.rate_limiter = RateLimiter(
-            min_interval=self.config.get("update_interval", 0.05)
-        )
+        self.pending_tools: Dict[str, list[ToolCall]] = {}
+        self.pending_stats: Dict[str, Dict[str, Any]] = {}
+        self.rate_limiter = _NoopRateLimiter()
 
         # 并发控制：per-session 锁
         self.session_locks: Dict[str, asyncio.Lock] = {}
@@ -85,9 +124,11 @@ class FeishuStreamingCardPlugin(Star):
 
         # 调试模式
         self.debug_mode = self.config.get("debug_mode", False)
+        self._release_reserved_metadata()
 
         # 安装/卸载 Monkey Patch
         if self.config.get("uninstall_patch", False):
+            uninstall_lifecycle_hook_passthrough()
             if StreamingPatch.uninstall():
                 logger.info("[飞书流式卡片] 已按配置卸载 Patch")
             else:
@@ -95,12 +136,62 @@ class FeishuStreamingCardPlugin(Star):
         elif self.config.get("enabled", True):
             self._install_patch()
         else:
+            uninstall_lifecycle_hook_passthrough()
             StreamingPatch.uninstall()
             logger.info("[飞书流式卡片] 插件已禁用")
 
+    async def initialize(self):
+        """AstrBot 完成 metadata 装载后安装生命周期 hook 透传。"""
+        self._release_reserved_metadata()
+        installed = False
+        if self.config.get("enabled", True) and not self.config.get("uninstall_patch", False):
+            installed = install_lifecycle_hook_passthrough(self)
+        if self.debug_mode:
+            logger.debug(f"[飞书流式卡片] 生命周期 hook 透传: {installed}")
+
     async def terminate(self):
         """插件卸载/停用时恢复原生 send_streaming。"""
+        uninstall_lifecycle_hook_passthrough()
         StreamingPatch.uninstall()
+
+    def _release_reserved_metadata(self):
+        """确保插件不是 AstrBot 保留插件，避免影响删除/卸载。"""
+        hits = []
+        star_map = None
+        try:
+            from astrbot.core.star.star import star_map
+        except Exception:
+            module = sys.modules.get("astrbot.core.star.star")
+            star_map = getattr(module, "star_map", None)
+        if not isinstance(star_map, dict):
+            return hits
+
+        module_names = {
+            self.__class__.__module__,
+            __name__,
+            "astrbot_plugin_feishu_streaming_card.main",
+        }
+        for module_name in module_names:
+            meta = star_map.get(module_name)
+            if meta is not None:
+                try:
+                    meta.reserved = False
+                    hits.append(module_name)
+                except Exception:
+                    pass
+
+        for module_name, meta in list(star_map.items()):
+            try:
+                if (
+                    getattr(meta, "star_cls", None) is self
+                    or getattr(meta, "star_cls_type", None) is self.__class__
+                ):
+                    meta.reserved = False
+                    if module_name not in hits:
+                        hits.append(module_name)
+            except Exception:
+                continue
+        return hits
 
     @staticmethod
     async def _maybe_await(value):
@@ -137,164 +228,6 @@ class FeishuStreamingCardPlugin(Star):
     @staticmethod
     def _response_error(response) -> str:
         return f"{getattr(response, 'code', 'unknown')} - {getattr(response, 'msg', '')}"
-
-    @staticmethod
-    def _chunk_to_text(chunk) -> str:
-        """从 AstrBot send_streaming chunk 中提取纯文本。
-
-        AstrBot Lark 的 send_streaming generator 产出通常是 MessageChain，
-        不是字符串。这里只抽取 Plain.text；工具边界等非文本 chunk 返回空串。
-        """
-        if chunk is None:
-            return ""
-        if isinstance(chunk, str):
-            return chunk
-
-        chain = getattr(chunk, 'chain', None)
-        if isinstance(chain, list):
-            parts = []
-            for comp in chain:
-                text = getattr(comp, 'text', None)
-                if text:
-                    parts.append(str(text))
-            return ''.join(parts)
-
-        text = getattr(chunk, 'text', None)
-        if text:
-            return str(text)
-
-        return ""
-
-    def _build_streaming_card(self, session: CardSession) -> dict:
-        """构建 CardKit streaming 初始卡片。"""
-        status_info = {
-            "thinking": ("思考中...", "indigo"),
-            "completed": ("✓ 完成", "green"),
-            "failed": ("✗ 处理失败", "red"),
-        }.get(session.status, ("思考中...", "indigo"))
-
-        return {
-            "schema": "2.0",
-            "config": {
-                "streaming_mode": True,
-                "update_multi": True,
-                "summary": {"content": status_info[0]},
-                "streaming_config": {
-                    "print_frequency_ms": {
-                        "default": int(
-                            self.config.get("streaming_print_frequency_ms", 20)
-                        )
-                    },
-                    "print_step": {
-                        "default": int(self.config.get("streaming_print_step", 24))
-                    },
-                    "print_strategy": "fast",
-                },
-            },
-            "header": {
-                "template": status_info[1],
-                "title": {"tag": "plain_text", "content": "AstrBot"},
-                "subtitle": {"tag": "plain_text", "content": status_info[0]},
-            },
-            "body": {
-                "elements": [
-                    {
-                        "tag": "markdown",
-                        "content": session.answer_text or "",
-                        "element_id": "markdown_1",
-                    }
-                ]
-            },
-        }
-
-    @staticmethod
-    def _apply_card_header(card: dict, session: CardSession) -> dict:
-        """给原生 CardKit 初始卡片注入插件标题区域。"""
-        status_info = {
-            "thinking": ("思考中...", "indigo"),
-            "completed": ("✓ 完成", "green"),
-            "failed": ("✗ 处理失败", "red"),
-        }.get(session.status, ("思考中...", "indigo"))
-
-        card.setdefault("config", {})
-        card["config"].setdefault("summary", {})["content"] = status_info[0]
-        card["header"] = {
-            "template": status_info[1],
-            "title": {"tag": "plain_text", "content": "AstrBot"},
-            "subtitle": {"tag": "plain_text", "content": status_info[0]},
-        }
-        return card
-
-    def _mutate_card_json_text(self, text: str, session: CardSession) -> str:
-        """如果字符串是飞书卡片 JSON，则注入标题后返回。"""
-        try:
-            data = json.loads(text)
-        except Exception:
-            return text
-
-        if not isinstance(data, dict):
-            return text
-        if "body" not in data and "schema" not in data and "config" not in data:
-            return text
-
-        self._apply_card_header(data, session)
-        return json.dumps(data, ensure_ascii=False)
-
-    def _mutate_card_request_object(self, obj, session: CardSession, seen=None) -> bool:
-        """递归修改 lark-oapi request 中的 card_json data/content 字段。"""
-        if obj is None:
-            return False
-        if seen is None:
-            seen = set()
-
-        obj_id = id(obj)
-        if obj_id in seen:
-            return False
-        seen.add(obj_id)
-
-        changed = False
-        if isinstance(obj, dict):
-            for key, value in list(obj.items()):
-                if isinstance(value, str):
-                    new_value = self._mutate_card_json_text(value, session)
-                    if new_value != value:
-                        obj[key] = new_value
-                        changed = True
-                elif self._mutate_card_request_object(value, session, seen):
-                    changed = True
-            return changed
-
-        if isinstance(obj, list):
-            for i, value in enumerate(list(obj)):
-                if isinstance(value, str):
-                    new_value = self._mutate_card_json_text(value, session)
-                    if new_value != value:
-                        obj[i] = new_value
-                        changed = True
-                elif self._mutate_card_request_object(value, session, seen):
-                    changed = True
-            return changed
-
-        if isinstance(obj, (str, bytes, int, float, bool)):
-            return False
-
-        attrs = getattr(obj, '__dict__', None)
-        if not isinstance(attrs, dict):
-            return False
-
-        for key, value in list(attrs.items()):
-            if isinstance(value, str):
-                new_value = self._mutate_card_json_text(value, session)
-                if new_value != value:
-                    try:
-                        setattr(obj, key, new_value)
-                        changed = True
-                    except Exception:
-                        pass
-            elif self._mutate_card_request_object(value, session, seen):
-                changed = True
-
-        return changed
 
     def _install_patch(self):
         """安装 Monkey Patch"""
@@ -359,12 +292,15 @@ class FeishuStreamingCardPlugin(Star):
         try:
             # 创建会话
             session_key = self._make_session_key(event)
+            session_id = self._event_session_id(event)
             session = self.session_manager.get_or_create(
                 session_key,
-                conversation_id=event.session_id,
+                unified_msg_origin=self._event_origin(event),
+                conversation_id=session_id,
                 message_id=getattr(event.message_obj, 'message_id', 'unknown'),
                 chat_id=getattr(event.message_obj, 'chat_id', 'unknown')
             )
+            self._apply_pending_session_data(event, session)
 
             if self.debug_mode:
                 logger.debug(f"[飞书流式卡片] 创建会话: {session_key}")
@@ -386,7 +322,10 @@ class FeishuStreamingCardPlugin(Star):
             if self.debug_mode:
                 logger.debug(f"[飞书流式卡片] 会话完成: {session_key}")
 
-            return result if result is not None else session.answer_text
+            # send_streaming 是副作用接口：正文已经由飞书原生流式发送。
+            # 如果原生返回 None，不能把旁路捕获的 session.answer_text 返回给上层，
+            # 否则 AstrBot 可能把它当作普通结果再次发送，造成二次输出/二次链路。
+            return result
 
         except Exception as e:
             logger.error(f"[飞书流式卡片] 处理失败: {e}", exc_info=True)
@@ -422,14 +361,16 @@ class FeishuStreamingCardPlugin(Star):
             if not chunk:
                 continue
 
-            chunk_text = self._chunk_to_text(chunk)
+            chunk_text = chunk_to_text(chunk)
             if not chunk_text:
                 continue
 
             # 累积文本
             session.answer_text = normalizer.feed(chunk_text)
 
-            await self._update_card(event, session)
+            # 兼容旧单元测试保留本方法，但主链路已不再实时更新卡片。
+            if hasattr(self, 'rate_limiter'):
+                await self._update_card(event, session)
 
         # 最终归一化
         session.answer_text = normalizer.finalize()
@@ -445,119 +386,6 @@ class FeishuStreamingCardPlugin(Star):
         if current is not None and extractor is not None:
             return extractor(current)
         return None
-
-    @staticmethod
-    def _capture_lark_ids_from_response(response) -> dict[str, str]:
-        """从 lark-oapi response/data 中提取 message_id/card_id。"""
-        captured: dict[str, str] = {}
-        for obj in (response, getattr(response, 'data', None)):
-            if obj is None:
-                continue
-            message_id = getattr(obj, 'message_id', None)
-            card_id = getattr(obj, 'card_id', None)
-            if message_id:
-                captured['message_id'] = message_id
-            if card_id:
-                captured['card_id'] = card_id
-        return captured
-
-    def _wrap_native_lark_methods(self, event, session: CardSession):
-        """临时包装原生流式内部方法，仅用于捕获最终 message_id/card_id。"""
-        captured: dict[str, str] = {}
-        restore: list[tuple[Any, str, Any]] = []
-
-        def remember(values: dict[str, str]) -> None:
-            if values.get('message_id'):
-                captured['message_id'] = values['message_id']
-                session.feishu_message_id = values['message_id']
-            if values.get('card_id'):
-                captured['card_id'] = values['card_id']
-                session.card_id = values['card_id']
-
-        def make_wrapper(name: str, original):
-            async def wrapper(*args, **kwargs):
-                if name in ('_create_streaming_card', 'card_create'):
-                    for arg in args:
-                        self._mutate_card_request_object(arg, session)
-                    for value in kwargs.values():
-                        self._mutate_card_request_object(value, session)
-
-                if name in (
-                    '_send_card_message',
-                    '_send_message',
-                    'message_create',
-                    'message_reply',
-                ):
-                    for arg in args:
-                        if isinstance(arg, str) and arg.startswith('card'):
-                            remember({'card_id': arg})
-
-                result = original(*args, **kwargs)
-                result = await self._maybe_await(result)
-
-                values = self._capture_lark_ids_from_response(result)
-                if isinstance(result, str):
-                    if name in ('_create_streaming_card', 'card_create'):
-                        values['card_id'] = result
-                    elif name in (
-                        '_send_card_message',
-                        '_send_message',
-                        'message_create',
-                        'message_reply',
-                    ):
-                        values['message_id'] = result
-                remember(values)
-                return result
-
-            return wrapper
-
-        for name in (
-            '_create_streaming_card',
-            '_send_card_message',
-            '_send_message',
-            '_close_streaming_mode',
-        ):
-            original = getattr(event, name, None)
-            if callable(original):
-                restore.append((event, name, original))
-                setattr(event, name, make_wrapper(name, original))
-
-        # 部分 AstrBot 版本不经过 event._create_streaming_card，而是直接调用
-        # lark_client.cardkit.v1.card.create/acreate 和 im.v1.message.*。
-        # 因此这里再临时包装底层 API：开始时注入 header，结束时才能捕获
-        # message_id 进行最终状态/footer patch。
-        lark_client = getattr(event, 'bot', None)
-
-        card_api = getattr(
-            getattr(getattr(lark_client, 'cardkit', None), 'v1', None),
-            'card',
-            None,
-        )
-        if card_api is not None:
-            for method_name in ('create', 'acreate'):
-                original = getattr(card_api, method_name, None)
-                if callable(original):
-                    restore.append((card_api, method_name, original))
-                    setattr(card_api, method_name, make_wrapper('card_create', original))
-
-        message_api = getattr(
-            getattr(getattr(lark_client, 'im', None), 'v1', None),
-            'message',
-            None,
-        )
-        if message_api is not None:
-            for method_name, wrapper_name in (
-                ('create', 'message_create'),
-                ('acreate', 'message_create'),
-                ('reply', 'message_reply'),
-                ('areply', 'message_reply'),
-            ):
-                original = getattr(message_api, method_name, None)
-                if callable(original):
-                    restore.append((message_api, method_name, original))
-                    setattr(message_api, method_name, make_wrapper(wrapper_name, original))
-
-        return captured, restore
 
     async def _native_streaming_with_capture(
         self,
@@ -577,13 +405,13 @@ class FeishuStreamingCardPlugin(Star):
 
         async def capture_generator():
             async for chunk in generator:
-                text = self._chunk_to_text(chunk)
+                text = chunk_to_text(chunk)
                 if text:
                     session.answer_text = normalizer.feed(text)
                 yield chunk
             session.answer_text = normalizer.finalize()
 
-        _captured, restore = self._wrap_native_lark_methods(event, session)
+        _captured, restore = wrap_native_lark_methods(event, session, self._maybe_await)
         try:
             result = await original_send_streaming(
                 event,
@@ -598,6 +426,8 @@ class FeishuStreamingCardPlugin(Star):
         if not session.answer_text and isinstance(result, str):
             session.answer_text = result
 
+        self._apply_pending_session_data(event, session)
+
         return result
 
     async def _create_streaming_card(self, event, session: CardSession) -> str:
@@ -611,7 +441,7 @@ class FeishuStreamingCardPlugin(Star):
         request = CreateCardRequest.builder().request_body(
             CreateCardRequestBody.builder()
             .type("card_json")
-            .data(json.dumps(self._build_streaming_card(session), ensure_ascii=False))
+            .data(json.dumps(build_streaming_card(session), ensure_ascii=False))
             .build()
         ).build()
 
@@ -774,7 +604,7 @@ class FeishuStreamingCardPlugin(Star):
             session: 卡片会话
             force: 是否强制更新（忽略节流）
         """
-        if not session.feishu_message_id:
+        if not session.feishu_message_id or not session.card_id:
             return
 
         session_key = self._make_session_key(event)
@@ -782,15 +612,7 @@ class FeishuStreamingCardPlugin(Star):
 
         # 使用 per-session 锁保护 PATCH 操作
         async with lock:
-            # 检查节流（除非强制更新）
-            if not force:
-                should_update = await self.rate_limiter.should_update(
-                    session.feishu_message_id
-                )
-                if not should_update:
-                    return
-
-            if not session.is_terminal:
+            if not session.is_terminal and not session.has_tools:
                 return
 
             card_json = render_card(
@@ -850,7 +672,7 @@ class FeishuStreamingCardPlugin(Star):
 
         result = []
         async for chunk in generator:
-            text = self._chunk_to_text(chunk)
+            text = chunk_to_text(chunk)
             if text:
                 result.append(text)
 
@@ -870,44 +692,165 @@ class FeishuStreamingCardPlugin(Star):
     @staticmethod
     def _make_session_key(event) -> str:
         """生成会话键"""
-        message_id = getattr(event.message_obj, 'message_id', 'unknown')
-        return f"{event.session_id}:{message_id}"
+        message_id = getattr(getattr(event, 'message_obj', None), 'message_id', 'unknown')
+        origin = FeishuStreamingCardPlugin._event_origin(event)
+        return f"{origin}:{message_id}"
+
+    @staticmethod
+    def _pending_key(event) -> str:
+        keys = FeishuStreamingCardPlugin._event_keys(event)
+        return keys[0] if keys else ""
+
+    @staticmethod
+    def _event_origin(event) -> str:
+        for attr in ("unified_msg_origin", "session"):
+            try:
+                value = getattr(event, attr, None)
+            except Exception:
+                value = None
+            if value:
+                return str(value)
+        return FeishuStreamingCardPlugin._event_session_id(event)
+
+    @staticmethod
+    def _event_session_id(event) -> str:
+        try:
+            value = getattr(event, 'session_id', None)
+        except Exception:
+            value = None
+        if value:
+            return str(value)
+
+        origin = ""
+        try:
+            origin = str(getattr(event, "unified_msg_origin", "") or "")
+        except Exception:
+            origin = ""
+        if origin and ":" in origin:
+            return origin.rsplit(":", 1)[-1]
+        return origin
+
+    @staticmethod
+    def _event_keys(event) -> list[str]:
+        keys = []
+        for value in (
+            FeishuStreamingCardPlugin._event_origin(event),
+            FeishuStreamingCardPlugin._event_session_id(event),
+        ):
+            if value and value not in keys:
+                keys.append(value)
+        return keys
+
+    def _find_session_for_event(self, event) -> Optional[CardSession]:
+        """生命周期钩子里的 message_id 经常和 send_streaming 不一致，按会话兜底匹配。"""
+        try:
+            exact = self.session_manager.get(self._make_session_key(event))
+            if exact:
+                return exact
+        except Exception:
+            pass
+
+        origin = self._event_origin(event)
+        if origin:
+            candidates = [
+                s for s in self.session_manager.sessions.values()
+                if getattr(s, "unified_msg_origin", "") == origin
+            ]
+            if candidates:
+                return max(candidates, key=lambda s: s.start_time)
+
+        session_id = self._event_session_id(event)
+        if not session_id:
+            return None
+        candidates = [
+            s for s in self.session_manager.sessions.values()
+            if s.conversation_id == session_id
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda s: s.start_time)
+
+    def _apply_pending_session_data(self, event, session: CardSession):
+        for key in self._event_keys(event):
+            if key in self.pending_tools:
+                session.tools.extend(self.pending_tools.pop(key))
+            if key in self.pending_stats:
+                apply_stats(session, self.pending_stats.pop(key))
+
+    def _remember_stats(self, event, stats: Dict[str, Any]):
+        session = self._find_session_for_event(event)
+        if session:
+            apply_stats(session, stats)
+            return session
+
+        key = self._pending_key(event)
+        existing = self.pending_stats.get(key, {})
+        merged = {**existing}
+        for k, v in stats.items():
+            if v not in (None, "", 0):
+                merged[k] = v
+            elif k not in merged:
+                merged[k] = v
+        self.pending_stats[key] = merged
+        return None
+
+    def _merge_response_tool_calls(self, event, resp, session: Optional[CardSession] = None):
+        names = getattr(resp, 'tools_call_name', None) or []
+        args_list = getattr(resp, 'tools_call_args', None) or []
+        if not names:
+            return
+
+        if session is None:
+            session = self._find_session_for_event(event)
+
+        calls = []
+        for i, name in enumerate(names):
+            args = args_list[i] if i < len(args_list) else {}
+            calls.append(
+                ToolCall(
+                    name=str(name),
+                    args=normalize_tool_args(args),
+                    status="completed",
+                )
+            )
+
+        if session:
+            existing = {(tool.name, json.dumps(tool.args, sort_keys=True, ensure_ascii=False)) for tool in session.tools}
+            for call in calls:
+                key = (call.name, json.dumps(call.args, sort_keys=True, ensure_ascii=False))
+                if key not in existing:
+                    session.tools.append(call)
+        else:
+            self.pending_tools.setdefault(self._pending_key(event), []).extend(calls)
+
+    @_optional_hook("on_llm_request")
+    async def capture_llm_request(self, event: AstrMessageEvent, req):
+        """LLMResponse 本身不一定带模型名，优先从 ProviderRequest 记录。"""
+        model = getattr(req, 'model', None)
+        if not model:
+            provider = getattr(req, 'provider', None) or getattr(req, 'provider_meta', None)
+            model = provider_model_name(provider)
+
+        if not model:
+            model = await current_provider_model(self.context, event, self._maybe_await)
+
+        if model:
+            self._remember_stats(event, {'model': str(model)})
 
     # LLM 生命周期钩子
     @filter.on_llm_response()
     async def extract_llm_stats(self, event: AstrMessageEvent, resp):
         """提取 LLM 统计信息"""
-        session_key = self._make_session_key(event)
-        session = self.session_manager.get(session_key)
+        stats = extract_stats_payload(resp)
+        if not stats.get('model'):
+            model = await current_provider_model(self.context, event, self._maybe_await)
+            if model:
+                stats['model'] = model
+
+        session = self._remember_stats(event, stats)
 
         if session:
-            usage = getattr(resp, 'usage', {}) or {}
-
-            def _usage_get(*names):
-                for name in names:
-                    if isinstance(usage, dict):
-                        value = usage.get(name)
-                    else:
-                        value = getattr(usage, name, None)
-                    if value:
-                        return value
-                return 0
-
-            # 兼容不同的 token 字段名
-            session.input_tokens = _usage_get(
-                "input_tokens", "prompt_tokens", "input", "prompt"
-            )
-            session.output_tokens = _usage_get(
-                "output_tokens", "completion_tokens", "output", "completion"
-            )
-            session.model = (
-                getattr(resp, 'model', None)
-                or getattr(resp, 'model_name', None)
-                or getattr(resp, 'llm_model', None)
-                or getattr(resp, 'provider_model', None)
-                or session.model
-                or "Unknown"
-            )
+            self._merge_response_tool_calls(event, resp, session)
 
             if self.debug_mode:
                 logger.debug(
@@ -920,43 +863,92 @@ class FeishuStreamingCardPlugin(Star):
                     await self._update_card(event, session, force=True)
                 except Exception as e:
                     logger.error(f"[飞书流式卡片] 刷新统计信息失败: {e}")
+        else:
+            self._merge_response_tool_calls(event, resp, None)
+
+    @_optional_hook("on_agent_done")
+    async def capture_agent_done(self, event: AstrMessageEvent, run_context, resp):
+        """Agent 完成后补齐最终统计，并刷新终态卡片。"""
+        stats = extract_stats_payload(resp)
+        if not stats.get('model'):
+            model = await current_provider_model(self.context, event, self._maybe_await)
+            if model:
+                stats['model'] = model
+
+        session = self._remember_stats(event, stats)
+        if session:
+            self._merge_response_tool_calls(event, resp, session)
+            if session.is_terminal and session.feishu_message_id:
+                try:
+                    await self._update_card(event, session, force=True)
+                except Exception as e:
+                    logger.error(f"[飞书流式卡片] 刷新 Agent 统计失败: {e}")
+        else:
+            self._merge_response_tool_calls(event, resp, None)
 
     @filter.on_using_llm_tool()
-    async def track_tool_call(self, event: AstrMessageEvent, tool_name: str, args: dict):
+    async def track_tool_call(self, event: AstrMessageEvent, tool, tool_args: dict | None = None):
         """跟踪工具调用"""
-        if not self._is_lark_event(event):
-            return
-
-        session_key = self._make_session_key(event)
-        session = self.session_manager.get(session_key)
+        session = self._find_session_for_event(event)
+        tool_name_value = tool_name(tool)
+        tool_call = ToolCall(
+            name=tool_name_value,
+            args=normalize_tool_args(tool_args),
+            status="running",
+        )
 
         if session:
-            tool_call = ToolCall(name=tool_name, args=args, status="running")
             session.tools.append(tool_call)
 
             if self.debug_mode:
-                logger.debug(f"[飞书流式卡片] 工具调用: {tool_name}")
+                logger.debug(f"[飞书流式卡片] 工具调用: {tool_name_value}")
 
             # 立即更新卡片显示工具调用
             try:
                 await self._update_card(event, session, force=True)
             except Exception as e:
                 logger.error(f"[飞书流式卡片] 更新工具状态失败: {e}")
+        else:
+            self.pending_tools.setdefault(self._pending_key(event), []).append(tool_call)
 
     @filter.on_llm_tool_respond()
-    async def update_tool_result(self, event: AstrMessageEvent, result):
+    async def update_tool_result(
+        self,
+        event: AstrMessageEvent,
+        tool,
+        tool_args: dict | None = None,
+        tool_result=None,
+    ):
         """更新工具结果"""
-        if not self._is_lark_event(event):
-            return
-
-        session_key = self._make_session_key(event)
-        session = self.session_manager.get(session_key)
+        session = self._find_session_for_event(event)
+        result_preview = str(tool_result)[:100]
+        tool_name_value = tool_name(tool)
 
         if session and session.tools:
             # 更新最后一个工具的状态
             last_tool = session.tools[-1]
             last_tool.status = "completed"
-            last_tool.result = str(result)[:100]  # 截断长结果
+            last_tool.result = result_preview  # 截断长结果
 
             if self.debug_mode:
                 logger.debug(f"[飞书流式卡片] 工具完成: {last_tool.name}")
+
+            if session.feishu_message_id:
+                try:
+                    await self._update_card(event, session, force=True)
+                except Exception as e:
+                    logger.error(f"[飞书流式卡片] 刷新工具状态失败: {e}")
+        else:
+            pending = self.pending_tools.setdefault(self._pending_key(event), [])
+            if pending:
+                pending[-1].status = "completed"
+                pending[-1].result = result_preview
+            else:
+                pending.append(
+                    ToolCall(
+                        name=tool_name_value,
+                        args=normalize_tool_args(tool_args),
+                        status="completed",
+                        result=result_preview,
+                    )
+                )

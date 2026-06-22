@@ -28,6 +28,7 @@ class CardSession:
     conversation_id: str
     message_id: str
     chat_id: str
+    unified_msg_origin: str = ""
     feishu_message_id: Optional[str] = None
     card_id: Optional[str] = None
     card_sequence: int = 0

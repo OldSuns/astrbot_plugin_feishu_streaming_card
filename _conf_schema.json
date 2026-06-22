@@ -26,7 +26,7 @@
   "max_sessions": {
     "title": "最大会话数",
     "type": "int",
-    "default": 100,
+    "default": 25,
     "minimum": 10,
     "maximum": 1000,
     "description": "内存中保持的最大会话数，超过后自动清理最旧的会话"
