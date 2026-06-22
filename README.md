@@ -11,6 +11,7 @@
 - **思考过程可视化**：展示 LLM 的推理过程（可选）
 - **工具调用跟踪**：实时显示工具调用状态和结果
 - **统计信息展示**：显示耗时、模型、token 消耗等元数据
+- **并发控制**：per-session 锁机制，避免并发更新导致的内容冲突
 - **安全降级**：异常时自动回退到原生流式输出
 - **高度可配置**：丰富的配置选项满足不同需求
 
@@ -120,7 +121,8 @@ AstrBot 主进程
    └─> FeishuStreamingCardPlugin
        ├─> Monkey Patch send_streaming
        ├─> SessionManager (会话管理)
-       ├─> RateLimiter (节流控制)
+       ├─> RateLimiter (节流控制 0.2s)
+       ├─> Per-Session 锁 (并发控制)
        └─> CardSession (状态机)
            └─> render_card() (卡片渲染)
                └─> 飞书 API (send/patch)

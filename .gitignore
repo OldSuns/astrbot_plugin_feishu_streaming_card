@@ -44,6 +44,7 @@ config.local.yaml
 .env.local
 
 # Test
+tests/
 .pytest_cache/
 .coverage
 htmlcov/

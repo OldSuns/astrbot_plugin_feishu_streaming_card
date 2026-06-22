@@ -5,6 +5,7 @@ Monkey Patch 模块
 """
 import time
 import asyncio
+import importlib
 from typing import Optional, Callable, Any
 from astrbot.api import logger
 
@@ -16,6 +17,41 @@ class StreamingPatch:
     _patch_token: str = "feishu_streaming_card_v1"
     _handler: Optional[Callable] = None
     _installed: bool = False
+
+    @classmethod
+    def _resolve_lark_message_event(cls):
+        """解析当前 AstrBot 版本中的 LarkMessageEvent。
+
+        注意：导入 lark_event.py 失败不一定代表“飞书平台不可用”。
+        lark_event.py 顶层还会导入 lark-oapi CardKit、媒体工具等依赖；
+        这些内部依赖缺失时同样会抛 ImportError。这里保留完整原因，
+        避免把真实根因误报为平台不可用。
+        """
+        candidates = (
+            "astrbot.core.platform.sources.lark.lark_event",
+            # 兼容旧版/历史路径；当前 AstrBot 主线使用 lark_event.py。
+            "astrbot.core.platform.sources.lark.lark_message_event",
+        )
+        errors = []
+
+        for module_name in candidates:
+            try:
+                module = importlib.import_module(module_name)
+                event_cls = getattr(module, "LarkMessageEvent")
+                if not hasattr(event_cls, "send_streaming"):
+                    raise AttributeError(
+                        f"{module_name}.LarkMessageEvent has no send_streaming"
+                    )
+                return event_cls
+            except Exception as e:
+                errors.append(f"{module_name}: {type(e).__name__}: {e}")
+
+        logger.error(
+            "[飞书流式卡片] Cannot resolve LarkMessageEvent. "
+            "This usually means AstrBot/Lark internals or lark-oapi CardKit "
+            f"dependencies are incompatible. Tried: {'; '.join(errors)}"
+        )
+        return None
 
     @classmethod
     def install(cls, handler: Callable) -> bool:
@@ -33,10 +69,8 @@ class StreamingPatch:
             logger.warning("[飞书流式卡片] Patch already installed")
             return False
 
-        try:
-            from astrbot.core.platform.sources.lark.lark_message_event import LarkMessageEvent
-        except ImportError:
-            logger.error("[飞书流式卡片] Cannot import LarkMessageEvent, Lark platform not available")
+        LarkMessageEvent = cls._resolve_lark_message_event()
+        if LarkMessageEvent is None:
             return False
 
         # 检查是否已有其他插件安装了 patch
@@ -52,19 +86,28 @@ class StreamingPatch:
         cls._handler = handler
 
         # 定义 patched 方法
-        async def patched_send_streaming(self, generator):
+        async def patched_send_streaming(self, generator, *args, **kwargs):
             try:
                 return await cls._handler(self, generator)
             except Exception as e:
                 logger.error(f"[飞书流式卡片] Streaming card failed: {e}", exc_info=True)
                 # 降级到原方法
                 if cls._original_send_streaming:
-                    return await cls._original_send_streaming(self, generator)
+                    return await cls._original_send_streaming(self, generator, *args, **kwargs)
                 else:
                     # 如果原方法不可用，至少消费 generator
                     result = []
                     async for chunk in generator:
-                        result.append(chunk)
+                        if isinstance(chunk, str):
+                            result.append(chunk)
+                        else:
+                            chain = getattr(chunk, 'chain', None)
+                            if isinstance(chain, list):
+                                result.extend(
+                                    str(getattr(comp, 'text'))
+                                    for comp in chain
+                                    if getattr(comp, 'text', None)
+                                )
                     return ''.join(result)
 
         # 标记 patch token
@@ -88,9 +131,8 @@ class StreamingPatch:
         if not cls._installed:
             return False
 
-        try:
-            from astrbot.core.platform.sources.lark.lark_message_event import LarkMessageEvent
-        except ImportError:
+        LarkMessageEvent = cls._resolve_lark_message_event()
+        if LarkMessageEvent is None:
             return False
 
         # 检查是否是我们的 patch
