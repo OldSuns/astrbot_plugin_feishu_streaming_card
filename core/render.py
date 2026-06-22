@@ -105,13 +105,11 @@ def render_card(
     # Footer 统计信息（完成状态）
     if show_footer and session.is_terminal:
         card["body"]["elements"].append({
-            "tag": "note",
-            "elements": [
-                {
-                    "tag": "plain_text",
-                    "content": session.footer_text
-                }
-            ]
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"<font color='grey'>{session.footer_text}</font>"
+            }
         })
 
     return json.dumps(card, ensure_ascii=False)

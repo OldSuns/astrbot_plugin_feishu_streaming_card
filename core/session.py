@@ -29,6 +29,8 @@ class CardSession:
     message_id: str
     chat_id: str
     feishu_message_id: Optional[str] = None
+    card_id: Optional[str] = None
+    card_sequence: int = 0
 
     status: str = "thinking"  # thinking | completed | failed
     start_time: float = field(default_factory=time.time)

@@ -19,6 +19,31 @@ class StreamingPatch:
     _installed: bool = False
 
     @classmethod
+    def _extract_original_send_streaming(cls, patched_func) -> Optional[Callable]:
+        """从当前 patched 函数中尽可能恢复原始 send_streaming。
+
+        兼容历史版本：旧版 patched_send_streaming 没有挂载
+        `_original_send_streaming` 属性，但闭包里通常保存着旧的
+        StreamingPatch 类对象，而原方法在该类的 `_original_send_streaming` 上。
+        """
+        original = getattr(patched_func, '_original_send_streaming', None)
+        if original is not None:
+            return original
+
+        closure = getattr(patched_func, '__closure__', None) or ()
+        for cell in closure:
+            try:
+                value = cell.cell_contents
+            except ValueError:
+                continue
+
+            original = getattr(value, '_original_send_streaming', None)
+            if original is not None:
+                return original
+
+        return None
+
+    @classmethod
     def _resolve_lark_message_event(cls):
         """解析当前 AstrBot 版本中的 LarkMessageEvent。
 
@@ -65,10 +90,6 @@ class StreamingPatch:
         Returns:
             是否安装成功
         """
-        if cls._installed:
-            logger.warning("[飞书流式卡片] Patch already installed")
-            return False
-
         LarkMessageEvent = cls._resolve_lark_message_event()
         if LarkMessageEvent is None:
             return False
@@ -76,19 +97,35 @@ class StreamingPatch:
         # 检查是否已有其他插件安装了 patch
         if hasattr(LarkMessageEvent.send_streaming, '_patch_token'):
             existing_token = LarkMessageEvent.send_streaming._patch_token
-            logger.warning(
-                f"[飞书流式卡片] send_streaming already patched by: {existing_token}"
-            )
-            return False
+            if existing_token == cls._patch_token:
+                original = (
+                    cls._extract_original_send_streaming(
+                        LarkMessageEvent.send_streaming
+                    )
+                    or cls._original_send_streaming
+                )
+                if original is None:
+                    logger.warning(
+                        "[飞书流式卡片] Existing plugin patch has no original method"
+                    )
+                    return False
+                cls._original_send_streaming = original
+                logger.info("[飞书流式卡片] Replacing existing plugin patch")
+            else:
+                logger.warning(
+                    f"[飞书流式卡片] send_streaming already patched by: {existing_token}"
+                )
+                return False
+        else:
+            # 保存原方法
+            cls._original_send_streaming = LarkMessageEvent.send_streaming
 
-        # 保存原方法
-        cls._original_send_streaming = LarkMessageEvent.send_streaming
         cls._handler = handler
 
         # 定义 patched 方法
         async def patched_send_streaming(self, generator, *args, **kwargs):
             try:
-                return await cls._handler(self, generator)
+                return await cls._handler(self, generator, *args, **kwargs)
             except Exception as e:
                 logger.error(f"[飞书流式卡片] Streaming card failed: {e}", exc_info=True)
                 # 降级到原方法
@@ -112,6 +149,7 @@ class StreamingPatch:
 
         # 标记 patch token
         patched_send_streaming._patch_token = cls._patch_token
+        patched_send_streaming._original_send_streaming = cls._original_send_streaming
 
         # 替换方法
         LarkMessageEvent.send_streaming = patched_send_streaming
@@ -128,9 +166,6 @@ class StreamingPatch:
         Returns:
             是否卸载成功
         """
-        if not cls._installed:
-            return False
-
         LarkMessageEvent = cls._resolve_lark_message_event()
         if LarkMessageEvent is None:
             return False
@@ -145,10 +180,17 @@ class StreamingPatch:
             )
             return False
 
-        # 恢复原方法
-        if cls._original_send_streaming:
-            LarkMessageEvent.send_streaming = cls._original_send_streaming
+        # 恢复原方法。优先从当前 patched 函数读取，兼容插件热重载后
+        # 新 StreamingPatch 类的 _original_send_streaming 为空的场景。
+        original = (
+            cls._extract_original_send_streaming(LarkMessageEvent.send_streaming)
+            or cls._original_send_streaming
+        )
+        if original:
+            LarkMessageEvent.send_streaming = original
             cls._installed = False
+            cls._original_send_streaming = None
+            cls._handler = None
             logger.info("[飞书流式卡片] Monkey Patch uninstalled successfully")
             return True
 

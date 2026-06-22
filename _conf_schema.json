@@ -5,14 +5,6 @@
     "default": true,
     "description": "是否启用飞书流式卡片增强功能"
   },
-  "update_interval": {
-    "title": "更新间隔（秒）",
-    "type": "float",
-    "default": 0.2,
-    "minimum": 0.1,
-    "maximum": 2.0,
-    "description": "卡片更新的最小时间间隔，避免频繁调用飞书 API"
-  },
   "show_thinking": {
     "title": "显示思考过程",
     "type": "bool",
@@ -52,6 +44,12 @@
     "type": "bool",
     "default": false,
     "description": "即使检测到冲突也强制安装 Monkey Patch（慎用）"
+  },
+  "uninstall_patch": {
+    "title": "卸载 Patch",
+    "type": "bool",
+    "default": false,
+    "description": "卸载 Monkey Patch"
   },
   "debug_mode": {
     "title": "调试模式",
