@@ -35,6 +35,10 @@ def status_tuple(session: CardSession) -> tuple[str, str]:
     }.get(session.status, ("思考中...", "indigo"))
 
 
+def summary_content(session: CardSession, fallback: str) -> str:
+    return (session.answer_text or "").strip() or fallback
+
+
 def build_streaming_card(session: CardSession) -> dict:
     """构建 CardKit streaming 初始卡片。"""
     subtitle, template = status_tuple(session)
@@ -44,12 +48,11 @@ def build_streaming_card(session: CardSession) -> dict:
         "config": {
             "streaming_mode": True,
             "update_multi": True,
-            "summary": {"content": subtitle},
+            "summary": {"content": summary_content(session, subtitle)},
         },
         "header": {
             "template": template,
-            "title": {"tag": "plain_text", "content": "AstrBot"},
-            "subtitle": {"tag": "plain_text", "content": subtitle},
+            "title": {"tag": "plain_text", "content": subtitle},
         },
         "body": {
             "elements": [
@@ -68,11 +71,10 @@ def apply_card_header(card: dict, session: CardSession) -> dict:
     subtitle, template = status_tuple(session)
 
     card.setdefault("config", {})
-    card["config"].setdefault("summary", {})["content"] = subtitle
+    card["config"].setdefault("summary", {})["content"] = summary_content(session, subtitle)
     card["header"] = {
         "template": template,
-        "title": {"tag": "plain_text", "content": "AstrBot"},
-        "subtitle": {"tag": "plain_text", "content": subtitle},
+        "title": {"tag": "plain_text", "content": subtitle},
     }
     return card
 

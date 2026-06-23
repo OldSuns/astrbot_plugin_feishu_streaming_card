@@ -4,15 +4,22 @@
 移植自 hermes-feishu-streaming-card 的 render.py
 """
 import json
-from typing import Dict, Any, Optional
+from typing import Dict
+from .lark_card import summary_content
 from .session import CardSession
+
+
+FOOTER_STYLE_COMPACT = "compact"
+FOOTER_STYLE_NORMAL = "normal"
+SUPPORTED_FOOTER_STYLES = {FOOTER_STYLE_COMPACT, FOOTER_STYLE_NORMAL}
 
 
 def render_card(
     session: CardSession,
     show_thinking: bool = True,
     show_tools: bool = True,
-    show_footer: bool = True
+    show_footer: bool = True,
+    footer_style: str = FOOTER_STYLE_COMPACT,
 ) -> str:
     """
     渲染飞书卡片 JSON
@@ -22,10 +29,17 @@ def render_card(
         show_thinking: 是否显示思考过程
         show_tools: 是否显示工具调用
         show_footer: 是否显示统计信息
+        footer_style: 统计信息样式，compact 使用 V2 普通文本 notation 小字号，normal 使用普通文本块
 
     Returns:
         飞书卡片 JSON 字符串
     """
+    if footer_style not in SUPPORTED_FOOTER_STYLES:
+        raise ValueError(
+            f"Unsupported footer_style: {footer_style}. "
+            f"Expected one of: {', '.join(sorted(SUPPORTED_FOOTER_STYLES))}"
+        )
+
     # 状态映射
     status_info = _get_status_info(session)
 
@@ -34,15 +48,11 @@ def render_card(
         "schema": "2.0",
         "config": {
             "update_multi": True,
-            "summary": {"content": status_info["subtitle"]}
+            "summary": {"content": summary_content(session, status_info["subtitle"])}
         },
         "header": {
             "template": status_info["template"],
             "title": {
-                "tag": "plain_text",
-                "content": "AstrBot"
-            },
-            "subtitle": {
                 "tag": "plain_text",
                 "content": status_info["subtitle"]
             }
@@ -104,15 +114,30 @@ def render_card(
 
     # Footer 统计信息（完成状态）
     if show_footer and session.is_terminal:
-        card["body"]["elements"].append({
+        card["body"]["elements"].append(_render_footer(session, footer_style))
+
+    return json.dumps(card, ensure_ascii=False)
+
+
+def _render_footer(session: CardSession, footer_style: str) -> Dict:
+    if footer_style == FOOTER_STYLE_NORMAL:
+        return {
             "tag": "div",
             "text": {
                 "tag": "lark_md",
-                "content": f"<font color='grey'>{session.footer_text}</font>"
-            }
-        })
+                "content": f"<font color='grey'>{session.footer_text}</font>",
+            },
+        }
 
-    return json.dumps(card, ensure_ascii=False)
+    return {
+        "tag": "div",
+        "text": {
+            "tag": "plain_text",
+            "content": session.footer_text,
+            "text_size": "notation",
+            "text_color": "grey",
+        },
+    }
 
 
 def _get_status_info(session: CardSession) -> Dict[str, str]:

@@ -23,6 +23,16 @@
     "default": true,
     "description": "是否显示耗时、模型、token 等统计信息"
   },
+  "footer_style": {
+    "title": "统计信息样式",
+    "type": "string",
+    "default": "compact",
+    "enum": [
+      "compact",
+      "normal"
+    ],
+    "description": "compact小字，normal普通"
+  },
   "max_sessions": {
     "title": "最大会话数",
     "type": "int",
@@ -38,12 +48,6 @@
     "minimum": 300,
     "maximum": 86400,
     "description": "会话在内存中保持的最长时间，超时后自动清理"
-  },
-  "force_patch": {
-    "title": "强制安装 Patch",
-    "type": "bool",
-    "default": false,
-    "description": "即使检测到冲突也强制安装 Monkey Patch（慎用）"
   },
   "uninstall_patch": {
     "title": "卸载 Patch",

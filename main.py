@@ -8,8 +8,6 @@ import importlib.util
 import inspect
 import json
 import sys
-import time
-import uuid
 from pathlib import Path
 from typing import Optional, Dict, Any
 from astrbot.api.star import Context, Star, register
@@ -47,7 +45,6 @@ try:
         StreamingTextNormalizer,
         StreamingPatch,
         apply_stats,
-        build_streaming_card,
         chunk_to_text,
         current_provider_model,
         extract_stats_payload,
@@ -84,7 +81,6 @@ except ImportError:
     StreamingTextNormalizer = _core_module.StreamingTextNormalizer
     StreamingPatch = _core_module.StreamingPatch
     apply_stats = _core_module.apply_stats
-    build_streaming_card = _core_module.build_streaming_card
     chunk_to_text = _core_module.chunk_to_text
     current_provider_model = _core_module.current_provider_model
     extract_stats_payload = _core_module.extract_stats_payload
@@ -231,15 +227,10 @@ class FeishuStreamingCardPlugin(Star):
 
     def _install_patch(self):
         """安装 Monkey Patch"""
-        force = self.config.get("force_patch", False)
-
-        if force:
-            logger.warning("[飞书流式卡片] 强制安装模式已启用")
-
         success = StreamingPatch.install(self._handle_streaming)
 
-        if not success and force:
-            logger.warning("[飞书流式卡片] 强制安装失败，可能存在兼容性问题")
+        if not success:
+            logger.warning("[飞书流式卡片] Monkey Patch 未安装，可能存在插件冲突或环境不兼容")
 
     async def _get_session_lock(self, session_key: str) -> asyncio.Lock:
         """
@@ -430,171 +421,6 @@ class FeishuStreamingCardPlugin(Star):
 
         return result
 
-    async def _create_streaming_card(self, event, session: CardSession) -> str:
-        """创建 CardKit 流式卡片实体。"""
-        from lark_oapi.api.cardkit.v1 import CreateCardRequest, CreateCardRequestBody
-
-        lark_client = event.bot
-        if getattr(lark_client, 'cardkit', None) is None:
-            raise RuntimeError("Lark API client cardkit module is not initialized")
-
-        request = CreateCardRequest.builder().request_body(
-            CreateCardRequestBody.builder()
-            .type("card_json")
-            .data(json.dumps(build_streaming_card(session), ensure_ascii=False))
-            .build()
-        ).build()
-
-        response = await self._call_lark_api(lark_client.cardkit.v1.card, "create", request)
-        if not self._response_success(response):
-            raise Exception(f"Lark CardKit create error: {self._response_error(response)}")
-        if response.data is None or not getattr(response.data, 'card_id', None):
-            raise Exception("Lark CardKit create succeeded but card_id is missing")
-
-        return response.data.card_id
-
-    async def _send_initial_card(self, event, session: CardSession) -> str:
-        """
-        发送初始卡片
-
-        Args:
-            event: LarkMessageEvent 实例
-            session: 卡片会话
-
-        Returns:
-            飞书消息 ID
-        """
-        # 调用飞书 API
-        lark_client = event.bot
-        chat_id = session.chat_id
-
-        try:
-            card_id = await self._create_streaming_card(event, session)
-            session.card_id = card_id
-
-            from lark_oapi.api.im.v1 import (
-                CreateMessageRequest,
-                CreateMessageRequestBody,
-                ReplyMessageRequest,
-                ReplyMessageRequestBody,
-            )
-
-            original_message_id = getattr(event.message_obj, 'message_id', None)
-            card_content = json.dumps(
-                {"type": "card", "data": {"card_id": card_id}},
-                ensure_ascii=False,
-            )
-
-            if original_message_id and original_message_id != 'unknown':
-                request = ReplyMessageRequest.builder() \
-                    .message_id(original_message_id) \
-                    .request_body(
-                        ReplyMessageRequestBody.builder()
-                        .msg_type("interactive")
-                        .content(card_content)
-                        .uuid(str(uuid.uuid4()))
-                        .reply_in_thread(False)
-                        .build()
-                    ).build()
-                response = await self._call_lark_message_api(
-                    lark_client.im.v1.message,
-                    "reply",
-                    request,
-                )
-            else:
-                request = CreateMessageRequest.builder() \
-                    .receive_id_type("chat_id") \
-                    .request_body(
-                        CreateMessageRequestBody.builder()
-                        .receive_id(chat_id)
-                        .msg_type("interactive")
-                        .content(card_content)
-                        .uuid(str(uuid.uuid4()))
-                        .build()
-                    ).build()
-                response = await self._call_lark_message_api(
-                    lark_client.im.v1.message,
-                    "create",
-                    request,
-                )
-
-            if not self._response_success(response):
-                raise Exception(f"Lark API error: {self._response_error(response)}")
-
-            message_id = response.data.message_id
-
-            if self.debug_mode:
-                logger.debug(f"[飞书流式卡片] 发送卡片成功: {message_id}")
-
-            return message_id
-
-        except Exception as e:
-            logger.error(f"[飞书流式卡片] 发送卡片失败: {e}", exc_info=True)
-            raise
-
-    async def _update_streaming_text(self, event, session: CardSession) -> bool:
-        """使用 CardKit streaming 接口更新正文文本。"""
-        if not session.card_id:
-            return False
-
-        from lark_oapi.api.cardkit.v1 import (
-            ContentCardElementRequest,
-            ContentCardElementRequestBody,
-        )
-
-        lark_client = event.bot
-        if getattr(lark_client, 'cardkit', None) is None:
-            return False
-
-        session.card_sequence += 1
-        request = ContentCardElementRequest.builder() \
-            .card_id(session.card_id) \
-            .element_id("markdown_1") \
-            .request_body(
-                ContentCardElementRequestBody.builder()
-                .content(session.answer_text or "")
-                .sequence(session.card_sequence)
-                .uuid(str(uuid.uuid4()))
-                .build()
-            ).build()
-
-        response = await self._call_lark_api(
-            lark_client.cardkit.v1.card_element,
-            "content",
-            request,
-        )
-        if not self._response_success(response):
-            if self.debug_mode:
-                logger.debug(f"[飞书流式卡片] 流式文本更新失败: {self._response_error(response)}")
-            return False
-        return True
-
-    async def _close_streaming_card(self, event, session: CardSession):
-        """关闭 CardKit streaming 模式。"""
-        if not session.card_id:
-            return
-
-        from lark_oapi.api.cardkit.v1 import SettingsCardRequest, SettingsCardRequestBody
-
-        lark_client = event.bot
-        if getattr(lark_client, 'cardkit', None) is None:
-            return
-
-        session.card_sequence += 1
-        request = SettingsCardRequest.builder() \
-            .card_id(session.card_id) \
-            .request_body(
-                SettingsCardRequestBody.builder()
-                .settings(json.dumps({"config": {"streaming_mode": False}}, ensure_ascii=False))
-                .sequence(session.card_sequence)
-                .uuid(str(uuid.uuid4()))
-                .build()
-            ).build()
-
-        response = await self._call_lark_api(lark_client.cardkit.v1.card, "settings", request)
-        if not self._response_success(response):
-            logger.error(f"[飞书流式卡片] 关闭流式模式失败: {self._response_error(response)}")
-
     async def _update_card(self, event, session: CardSession, force: bool = False):
         """
         更新卡片（带并发控制）
@@ -619,7 +445,8 @@ class FeishuStreamingCardPlugin(Star):
                 session,
                 show_thinking=self.config.get("show_thinking", True),
                 show_tools=self.config.get("show_tools", True),
-                show_footer=self.config.get("show_footer", True)
+                show_footer=self.config.get("show_footer", True),
+                footer_style=self.config.get("footer_style", "compact"),
             )
 
             # 调用飞书 API
