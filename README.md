@@ -9,7 +9,7 @@
 
 当前版本：`v0.2.2`
 
-<img width="1280" height="1943" alt="sample" src="https://github.com/user-attachments/assets/9e0ac584-c266-411b-99e9-78784cfe3c50" />
+<img width="400" alt="sample" src="https://github.com/user-attachments/assets/9e0ac584-c266-411b-99e9-78784cfe3c50" />
 
 ## 功能特性
 
