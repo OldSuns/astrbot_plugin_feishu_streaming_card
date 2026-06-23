@@ -37,6 +37,8 @@ class CardSession:
 
     thinking_text: str = ""
     answer_text: str = ""
+    streaming_text_element_id: str = "markdown_1"
+    thinking_panel_attached: bool = False
     tools: List[ToolCall] = field(default_factory=list)
 
     model: str = "Unknown"

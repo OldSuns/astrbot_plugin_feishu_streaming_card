@@ -4,8 +4,95 @@ import json
 from .session import CardSession
 
 
-def chunk_to_text(chunk) -> str:
-    """从 AstrBot send_streaming chunk 中提取纯文本。"""
+THINKING_PANEL_TITLE = "模型思考"
+THINKING_PANEL_ELEMENT_ID = "think_panel"
+
+
+def thinking_panel_element(thinking_text: str) -> dict:
+    return {
+        "tag": "collapsible_panel",
+        "element_id": THINKING_PANEL_ELEMENT_ID,
+        "expanded": False,
+        "background_color": "grey",
+        "padding": "8px 8px 8px 8px",
+        "margin": "4px 0px 4px 0px",
+        "border": {
+            "color": "grey",
+            "corner_radius": "6px",
+        },
+        "header": {
+            "title": {
+                "tag": "plain_text",
+                "content": THINKING_PANEL_TITLE,
+            },
+            "background_color": "grey",
+        },
+        "elements": [
+            {
+                "tag": "markdown",
+                "content": thinking_text,
+            }
+        ],
+    }
+
+
+def _is_thinking_panel(element: dict) -> bool:
+    if element.get("tag") != "collapsible_panel":
+        return False
+    if element.get("element_id") == THINKING_PANEL_ELEMENT_ID:
+        return True
+    title = element.get("header", {}).get("title", {})
+    return title.get("content") == THINKING_PANEL_TITLE
+
+
+def _iter_card_elements(elements):
+    if not isinstance(elements, list):
+        return
+    for element in elements:
+        if not isinstance(element, dict):
+            continue
+        yield element
+        nested = element.get("elements")
+        if isinstance(nested, list):
+            yield from _iter_card_elements(nested)
+
+
+def remember_streaming_text_element(card: dict, session: CardSession) -> None:
+    """记录原生 CardKit 正文 markdown 元素，供后续组件级插入定位。"""
+    elements = card.get("body", {}).get("elements", [])
+    for element in _iter_card_elements(elements):
+        if element.get("tag") != "markdown":
+            continue
+        element_id = element.get("element_id")
+        if element_id and element_id != THINKING_PANEL_ELEMENT_ID:
+            session.streaming_text_element_id = str(element_id)
+            return
+
+
+def inject_thinking_panel(card: dict, thinking_text: str) -> dict:
+    if not thinking_text:
+        return card
+
+    body = card.setdefault("body", {})
+    elements = body.setdefault("elements", [])
+    if not isinstance(elements, list):
+        return card
+
+    for element in elements:
+        if isinstance(element, dict) and _is_thinking_panel(element):
+            element["elements"] = [
+                {
+                    "tag": "markdown",
+                    "content": thinking_text,
+                }
+            ]
+            return card
+
+    elements.insert(0, thinking_panel_element(thinking_text))
+    return card
+
+
+def _chunk_plain_text(chunk) -> str:
     if chunk is None:
         return ""
     if isinstance(chunk, str):
@@ -27,6 +114,33 @@ def chunk_to_text(chunk) -> str:
     return ""
 
 
+def is_reasoning_chunk(chunk) -> bool:
+    """判断 chunk 是否是 AstrBot 的 reasoning 消息链。"""
+    return getattr(chunk, "type", None) == "reasoning"
+
+
+def chunk_to_reasoning_text(chunk) -> str:
+    """从 AstrBot reasoning chunk 或 LLMResponse 中提取思考文本。"""
+    if chunk is None:
+        return ""
+
+    if is_reasoning_chunk(chunk):
+        return _chunk_plain_text(chunk)
+
+    reasoning = getattr(chunk, "reasoning_content", None)
+    if reasoning:
+        return str(reasoning)
+
+    return ""
+
+
+def chunk_to_text(chunk) -> str:
+    """从 AstrBot send_streaming chunk 中提取纯文本。"""
+    if is_reasoning_chunk(chunk):
+        return ""
+    return _chunk_plain_text(chunk)
+
+
 def status_tuple(session: CardSession) -> tuple[str, str]:
     return {
         "thinking": ("思考中...", "indigo"),
@@ -43,12 +157,16 @@ def apply_card_header(card: dict, session: CardSession) -> dict:
     """给原生 CardKit 初始卡片注入插件标题区域。"""
     subtitle, template = status_tuple(session)
 
+    remember_streaming_text_element(card, session)
     card.setdefault("config", {})
     card["config"].setdefault("summary", {})["content"] = summary_content(session, subtitle)
     card["header"] = {
         "template": template,
         "title": {"tag": "plain_text", "content": subtitle},
     }
+    if session.thinking_text:
+        inject_thinking_panel(card, session.thinking_text)
+        session.thinking_panel_attached = True
     return card
 
 
@@ -68,6 +186,13 @@ def mutate_card_json_text(text: str, session: CardSession) -> str:
     return json.dumps(data, ensure_ascii=False)
 
 
+def _looks_like_card_dict(data: dict) -> bool:
+    body = data.get("body")
+    if data.get("schema") or data.get("config"):
+        return True
+    return isinstance(body, dict) and isinstance(body.get("elements"), list)
+
+
 def mutate_card_request_object(obj, session: CardSession, seen=None) -> bool:
     """递归修改 lark-oapi request 中的 card_json data/content 字段。"""
     if obj is None:
@@ -82,6 +207,9 @@ def mutate_card_request_object(obj, session: CardSession, seen=None) -> bool:
 
     changed = False
     if isinstance(obj, dict):
+        if _looks_like_card_dict(obj):
+            apply_card_header(obj, session)
+            changed = True
         for key, value in list(obj.items()):
             if isinstance(value, str):
                 new_value = mutate_card_json_text(value, session)

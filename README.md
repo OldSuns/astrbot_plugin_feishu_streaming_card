@@ -7,9 +7,9 @@
 
 将 AstrBot 的 LLM 流式输出渲染为持续更新的飞书卡片，提供更好的用户体验。
 
-当前版本：`v0.2.2`
+当前版本：`v0.2.3`
 
-<img width="400" alt="sample" src="https://github.com/user-attachments/assets/9e0ac584-c266-411b-99e9-78784cfe3c50" />
+<img width="400" alt="sample" src="assets/sample.jpg" />
 
 ## 功能特性
 
@@ -92,7 +92,7 @@ pip install -r requirements.txt
 
 ### 基本使用
 
-插件安装并启用后，在飞书中与 AstrBot 对话时，LLM 正文仍使用 AstrBot/Lark 原生 CardKit 流式输出；插件只在创建卡片时补充状态 header，并在流式结束后更新完成状态、工具摘要和统计信息。飞书聊天框外部摘要优先使用实际回答正文。
+插件安装并启用后，在飞书中与 AstrBot 对话时，LLM 正文仍使用 AstrBot/Lark 原生 CardKit 流式输出；插件会让 AstrBot 上游对飞书透传 reasoning chunk，再预读开头的 reasoning 消息链，让初始卡片创建时就带折叠思考面板，并在流式结束后更新完成状态、工具摘要和统计信息。飞书聊天框外部摘要优先使用实际回答正文。
 
 插件不会把自身标记为 AstrBot 保留插件，仍可在 WebUI 中正常禁用、卸载和删除。
 

@@ -5,7 +5,7 @@
 """
 import json
 from typing import Dict
-from .lark_card import summary_content
+from .lark_card import summary_content, thinking_panel_element
 from .session import CardSession
 
 
@@ -76,13 +76,7 @@ def render_card(
 
     # 思考过程（如果有）
     if show_thinking and session.thinking_text:
-        card["body"]["elements"].append({
-            "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": f"**思考过程：**\n\n{session.thinking_text}"
-            }
-        })
+        card["body"]["elements"].append(thinking_panel_element(session.thinking_text))
 
         # 如果有回答内容，添加分隔线
         if session.answer_text:

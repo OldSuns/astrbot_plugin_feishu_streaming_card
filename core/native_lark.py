@@ -1,5 +1,5 @@
 """原生 Lark streaming 方法包装。"""
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Optional
 
 from .lark_card import (
     capture_lark_ids_from_response,
@@ -13,19 +13,24 @@ def wrap_native_lark_methods(
     event,
     session: CardSession,
     awaiter: Callable[[Any], Awaitable[Any]],
+    on_ids_captured: Optional[Callable[[], Awaitable[None]]] = None,
 ):
     """临时包装原生流式内部方法，仅用于捕获最终 message_id/card_id。"""
     captured: dict[str, str] = {}
     restore: list[tuple[Any, str, Any]] = []
     card_message_depth = 0
 
-    def remember(values: dict[str, str]) -> None:
+    def remember(values: dict[str, str]) -> bool:
+        changed = False
         if values.get("message_id"):
             captured["message_id"] = values["message_id"]
             session.feishu_message_id = values["message_id"]
+            changed = True
         if values.get("card_id"):
             captured["card_id"] = values["card_id"]
             session.card_id = values["card_id"]
+            changed = True
+        return changed
 
     def make_wrapper(name: str, original):
         async def wrapper(*args, **kwargs):
@@ -48,7 +53,8 @@ def wrap_native_lark_methods(
             if is_message_api:
                 for arg in args:
                     if isinstance(arg, str) and arg.startswith("card"):
-                        remember({"card_id": arg})
+                        if remember({"card_id": arg}) and on_ids_captured is not None:
+                            await on_ids_captured()
                         message_references_card = True
                         if name == "_send_card_message":
                             enters_card_message_scope = True
@@ -84,7 +90,8 @@ def wrap_native_lark_methods(
             if is_message_api and not message_references_card:
                 values.pop("message_id", None)
 
-            remember(values)
+            if remember(values) and on_ids_captured is not None:
+                await on_ids_captured()
             return result
 
         return wrapper

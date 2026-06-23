@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2026-06-23
+
+### Added
+- 支持在飞书流式卡片中显示模型思考过程，并以默认折叠面板展示。
+- 添加最终 reasoning 兜底合并，兼容不同 AstrBot/Provider 的思考内容返回方式。
+
+### Fixed
+- 修复思考内容可能泄漏到正文、重复显示或只能在完整输出结束后出现的问题。
+- 修复思考面板元素 ID 不符合飞书 CardKit 限制，导致流式卡片创建失败的问题。
+
 ## [0.2.2] - 2026-06-23
 
 ### Added

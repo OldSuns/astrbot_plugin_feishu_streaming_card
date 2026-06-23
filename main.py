@@ -39,12 +39,17 @@ try:
         StreamingTextNormalizer,
         StreamingPatch,
         apply_stats,
+        chunk_to_reasoning_text,
         chunk_to_text,
         current_provider_model,
         extract_stats_payload,
+        is_reasoning_chunk,
         normalize_tool_args,
         provider_model_name,
+        thinking_panel_element,
         tool_name,
+        install_reasoning_stream_patch,
+        uninstall_reasoning_stream_patch,
         install_lifecycle_hook_passthrough,
         uninstall_lifecycle_hook_passthrough,
         wrap_native_lark_methods,
@@ -75,12 +80,17 @@ except ImportError:
     StreamingTextNormalizer = _core_module.StreamingTextNormalizer
     StreamingPatch = _core_module.StreamingPatch
     apply_stats = _core_module.apply_stats
+    chunk_to_reasoning_text = _core_module.chunk_to_reasoning_text
     chunk_to_text = _core_module.chunk_to_text
     current_provider_model = _core_module.current_provider_model
     extract_stats_payload = _core_module.extract_stats_payload
+    is_reasoning_chunk = _core_module.is_reasoning_chunk
     normalize_tool_args = _core_module.normalize_tool_args
     provider_model_name = _core_module.provider_model_name
+    thinking_panel_element = _core_module.thinking_panel_element
     tool_name = _core_module.tool_name
+    install_reasoning_stream_patch = _core_module.install_reasoning_stream_patch
+    uninstall_reasoning_stream_patch = _core_module.uninstall_reasoning_stream_patch
     install_lifecycle_hook_passthrough = _core_module.install_lifecycle_hook_passthrough
     uninstall_lifecycle_hook_passthrough = _core_module.uninstall_lifecycle_hook_passthrough
     wrap_native_lark_methods = _core_module.wrap_native_lark_methods
@@ -90,7 +100,7 @@ except ImportError:
     "astrbot_plugin_feishu_streaming_card",
     "AstrBot Contributors",
     "将 LLM 流式输出渲染为持续更新的飞书卡片",
-    "v0.2.2"
+    "v0.2.3"
 )
 class FeishuStreamingCardPlugin(Star):
     """飞书流式卡片插件"""
@@ -117,6 +127,7 @@ class FeishuStreamingCardPlugin(Star):
 
         # 安装/卸载 Monkey Patch
         if self.config.get("uninstall_patch", False):
+            uninstall_reasoning_stream_patch()
             uninstall_lifecycle_hook_passthrough()
             if StreamingPatch.uninstall():
                 logger.info("[飞书流式卡片] 已按配置卸载 Patch")
@@ -124,7 +135,9 @@ class FeishuStreamingCardPlugin(Star):
                 logger.warning("[飞书流式卡片] Patch 未安装或卸载失败")
         elif self.config.get("enabled", True):
             self._install_patch()
+            self._install_reasoning_patch()
         else:
+            uninstall_reasoning_stream_patch()
             uninstall_lifecycle_hook_passthrough()
             StreamingPatch.uninstall()
             logger.info("[飞书流式卡片] 插件已禁用")
@@ -133,13 +146,17 @@ class FeishuStreamingCardPlugin(Star):
         """AstrBot 完成 metadata 装载后安装生命周期 hook 透传。"""
         self._release_reserved_metadata()
         installed = False
+        reasoning_installed = False
         if self.config.get("enabled", True) and not self.config.get("uninstall_patch", False):
             installed = install_lifecycle_hook_passthrough(self)
+            reasoning_installed = self._install_reasoning_patch()
         if self.debug_mode:
             logger.debug(f"[飞书流式卡片] 生命周期 hook 透传: {installed}")
+            logger.debug(f"[飞书流式卡片] reasoning 流式透传: {reasoning_installed}")
 
     async def terminate(self):
         """插件卸载/停用时恢复原生 send_streaming。"""
+        uninstall_reasoning_stream_patch()
         uninstall_lifecycle_hook_passthrough()
         StreamingPatch.uninstall()
 
@@ -198,6 +215,55 @@ class FeishuStreamingCardPlugin(Star):
         method = getattr(message_api, method_name)
         return await self._maybe_await(method(request))
 
+    async def _create_thinking_panel_element(self, event, session: CardSession) -> bool:
+        """在原生 CardKit 流式卡片中插入已完成的思考面板。"""
+        if (
+            not self.config.get("show_thinking", True)
+            or not session.card_id
+            or not session.thinking_text
+            or session.thinking_panel_attached
+        ):
+            return False
+
+        card_element_api = getattr(
+            getattr(getattr(getattr(event, "bot", None), "cardkit", None), "v1", None),
+            "card_element",
+            None,
+        )
+        if card_element_api is None:
+            return False
+
+        from lark_oapi.api.cardkit.v1 import (
+            CreateCardElementRequest,
+            CreateCardElementRequestBody,
+        )
+
+        body_builder = (
+            CreateCardElementRequestBody.builder()
+            .type("insert_before")
+            .target_element_id(session.streaming_text_element_id)
+            .uuid(f"thinking-{session.card_id}")
+            .elements(json.dumps([thinking_panel_element(session.thinking_text)], ensure_ascii=False))
+        )
+        request = (
+            CreateCardElementRequest.builder()
+            .card_id(session.card_id)
+            .request_body(body_builder.build())
+            .build()
+        )
+
+        response = await self._call_lark_message_api(card_element_api, "create", request)
+        if not self._response_success(response):
+            logger.error(
+                f"[飞书流式卡片] 插入思考面板失败: {self._response_error(response)}"
+            )
+            return False
+
+        session.thinking_panel_attached = True
+        if self.debug_mode:
+            logger.debug(f"[飞书流式卡片] 已插入思考面板: {session.card_id}")
+        return True
+
     @staticmethod
     def _response_success(response) -> bool:
         success = getattr(response, 'success', None)
@@ -215,6 +281,16 @@ class FeishuStreamingCardPlugin(Star):
 
         if not success:
             logger.warning("[飞书流式卡片] Monkey Patch 未安装，可能存在插件冲突或环境不兼容")
+
+    def _install_reasoning_patch(self) -> bool:
+        """确保 AstrBot 上游把 Lark reasoning chunks 传到 send_streaming。"""
+        enabled = self.config.get("show_thinking", True)
+        installed = install_reasoning_stream_patch(enabled)
+        if self.debug_mode:
+            logger.debug(
+                f"[飞书流式卡片] reasoning patch: installed={installed}, enabled={enabled}"
+            )
+        return installed
 
     async def _get_session_lock(self, session_key: str) -> asyncio.Lock:
         """
@@ -336,6 +412,12 @@ class FeishuStreamingCardPlugin(Star):
             if not chunk:
                 continue
 
+            reasoning_text = chunk_to_reasoning_text(chunk)
+            if reasoning_text:
+                session.thinking_text += reasoning_text
+            if is_reasoning_chunk(chunk):
+                continue
+
             chunk_text = chunk_to_text(chunk)
             if not chunk_text:
                 continue
@@ -375,16 +457,73 @@ class FeishuStreamingCardPlugin(Star):
             return session.answer_text
 
         normalizer = StreamingTextNormalizer()
+        seen_reasoning = False
+        thinking_panel_attempted = False
+        pending_chunks = []
+
+        async def refresh_thinking_panel_before_answer():
+            nonlocal thinking_panel_attempted
+            if (
+                thinking_panel_attempted
+                or not seen_reasoning
+                or not session.thinking_text
+                or session.thinking_panel_attached
+            ):
+                return
+            if not session.card_id:
+                return
+
+            thinking_panel_attempted = True
+            try:
+                await self._create_thinking_panel_element(event, session)
+            except Exception as e:
+                logger.error(f"[飞书流式卡片] 提前刷新思考面板失败: {e}", exc_info=True)
+
+        async def preread_leading_reasoning():
+            nonlocal seen_reasoning
+            async for chunk in generator:
+                reasoning_text = chunk_to_reasoning_text(chunk)
+                if reasoning_text:
+                    session.thinking_text += reasoning_text
+                if is_reasoning_chunk(chunk):
+                    seen_reasoning = True
+                    continue
+                pending_chunks.append(chunk)
+                return
+
+        async def feed_answer_chunk(chunk):
+            text = chunk_to_text(chunk)
+            if text:
+                await refresh_thinking_panel_before_answer()
+                session.answer_text = normalizer.feed(text)
+            return text
 
         async def capture_generator():
+            nonlocal seen_reasoning
+            while pending_chunks:
+                chunk = pending_chunks.pop(0)
+                await feed_answer_chunk(chunk)
+                yield chunk
+
             async for chunk in generator:
-                text = chunk_to_text(chunk)
-                if text:
-                    session.answer_text = normalizer.feed(text)
+                reasoning_text = chunk_to_reasoning_text(chunk)
+                if reasoning_text:
+                    session.thinking_text += reasoning_text
+                if is_reasoning_chunk(chunk):
+                    seen_reasoning = True
+                    continue
+
+                await feed_answer_chunk(chunk)
                 yield chunk
             session.answer_text = normalizer.finalize()
 
-        _captured, restore = wrap_native_lark_methods(event, session, self._maybe_await)
+        await preread_leading_reasoning()
+        _captured, restore = wrap_native_lark_methods(
+            event,
+            session,
+            self._maybe_await,
+            refresh_thinking_panel_before_answer,
+        )
         try:
             result = await original_send_streaming(
                 event,
@@ -632,6 +771,23 @@ class FeishuStreamingCardPlugin(Star):
         else:
             self.pending_tools.setdefault(self._pending_key(event), []).extend(calls)
 
+    @staticmethod
+    def _merge_response_reasoning(session: CardSession, resp) -> None:
+        reasoning = getattr(resp, "reasoning_content", None)
+        if not reasoning:
+            return
+
+        reasoning = str(reasoning)
+        current = session.thinking_text
+        if not current:
+            session.thinking_text = reasoning
+        elif reasoning == current or reasoning in current:
+            return
+        elif current in reasoning:
+            session.thinking_text = reasoning
+        else:
+            session.thinking_text += reasoning
+
     @_optional_hook("on_llm_request")
     async def capture_llm_request(self, event: AstrMessageEvent, req):
         """LLMResponse 本身不一定带模型名，优先从 ProviderRequest 记录。"""
@@ -660,6 +816,7 @@ class FeishuStreamingCardPlugin(Star):
 
         if session:
             self._merge_response_tool_calls(event, resp, session)
+            self._merge_response_reasoning(session, resp)
 
             if self.debug_mode:
                 logger.debug(
@@ -687,6 +844,7 @@ class FeishuStreamingCardPlugin(Star):
         session = self._remember_stats(event, stats)
         if session:
             self._merge_response_tool_calls(event, resp, session)
+            self._merge_response_reasoning(session, resp)
             if session.is_terminal and session.feishu_message_id:
                 try:
                     await self._update_card(event, session)
