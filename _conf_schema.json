@@ -17,6 +17,24 @@
     "default": true,
     "description": "是否在卡片中显示工具调用历史"
   },
+  "tool_limit": {
+    "title": "工具调用显示数量",
+    "type": "int",
+    "default": 5,
+    "minimum": 0,
+    "maximum": 50,
+    "description": "最多显示几个工具调用，超出显示+n。"
+  },
+  "tool_range": {
+    "title": "工具调用显示范围",
+    "type": "string",
+    "default": "latest",
+    "enum": [
+      "latest",
+      "earliest"
+    ],
+    "description": "工具调用显示范围 latest:最新，earliest:最早"
+  },
   "show_footer": {
     "title": "显示统计信息",
     "type": "bool",
@@ -26,12 +44,12 @@
   "footer_style": {
     "title": "统计信息样式",
     "type": "string",
-    "default": "compact",
+    "default": "small",
     "enum": [
-      "compact",
-      "normal"
+      "small",
+      "md"
     ],
-    "description": "compact小字，normal普通"
+    "description": "统计信息样式 small:小字，md:灰字Markdown"
   },
   "max_sessions": {
     "title": "最大会话数",

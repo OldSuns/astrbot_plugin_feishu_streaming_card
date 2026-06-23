@@ -3,8 +3,6 @@ Monkey Patch 模块
 
 实现对 LarkMessageEvent.send_streaming 的拦截
 """
-import time
-import asyncio
 import importlib
 from typing import Optional, Callable, Any
 from astrbot.api import logger
@@ -200,54 +198,3 @@ class StreamingPatch:
     def is_installed(cls) -> bool:
         """是否已安装"""
         return cls._installed
-
-
-class RateLimiter:
-    """API 调用频率限制器"""
-
-    def __init__(self, min_interval: float = 0.2):
-        """
-        Args:
-            min_interval: 最小调用间隔（秒）
-        """
-        self.min_interval = min_interval
-        self.last_update: dict[str, float] = {}
-        self._lock = asyncio.Lock()
-
-    async def should_update(self, key: str, force: bool = False) -> bool:
-        """
-        判断是否应该更新
-
-        Args:
-            key: 更新键（通常是 message_id）
-            force: 是否强制更新
-
-        Returns:
-            是否应该更新
-        """
-        if force:
-            return True
-
-        async with self._lock:
-            now = time.time()
-            last = self.last_update.get(key, 0)
-
-            if (now - last) >= self.min_interval:
-                self.last_update[key] = now
-                return True
-
-            return False
-
-    def mark_updated(self, key: str):
-        """标记已更新"""
-        self.last_update[key] = time.time()
-
-    def cleanup_old_entries(self, max_age: float = 3600):
-        """清理旧的记录"""
-        now = time.time()
-        old_keys = [
-            key for key, timestamp in self.last_update.items()
-            if (now - timestamp) > max_age
-        ]
-        for key in old_keys:
-            self.last_update.pop(key, None)

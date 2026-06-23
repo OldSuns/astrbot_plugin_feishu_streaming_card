@@ -31,11 +31,9 @@ class CardSession:
     unified_msg_origin: str = ""
     feishu_message_id: Optional[str] = None
     card_id: Optional[str] = None
-    card_sequence: int = 0
 
     status: str = "thinking"  # thinking | completed | failed
     start_time: float = field(default_factory=time.time)
-    last_update_time: float = field(default_factory=time.time)
 
     thinking_text: str = ""
     answer_text: str = ""
@@ -109,12 +107,3 @@ class SessionManager:
         ]
         for key in expired:
             self.sessions.pop(key)
-
-    def stats(self) -> Dict[str, Any]:
-        """统计信息"""
-        return {
-            "total_sessions": len(self.sessions),
-            "active_sessions": sum(1 for s in self.sessions.values() if not s.is_terminal),
-            "completed_sessions": sum(1 for s in self.sessions.values() if s.status == "completed"),
-            "failed_sessions": sum(1 for s in self.sessions.values() if s.status == "failed"),
-        }

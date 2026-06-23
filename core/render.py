@@ -9,9 +9,12 @@ from .lark_card import summary_content
 from .session import CardSession
 
 
-FOOTER_STYLE_COMPACT = "compact"
-FOOTER_STYLE_NORMAL = "normal"
-SUPPORTED_FOOTER_STYLES = {FOOTER_STYLE_COMPACT, FOOTER_STYLE_NORMAL}
+FOOTER_STYLE_SMALL = "small"
+FOOTER_STYLE_MD = "md"
+SUPPORTED_FOOTER_STYLES = {FOOTER_STYLE_SMALL, FOOTER_STYLE_MD}
+TOOL_RANGE_LATEST = "latest"
+TOOL_RANGE_EARLIEST = "earliest"
+SUPPORTED_TOOL_RANGES = {TOOL_RANGE_LATEST, TOOL_RANGE_EARLIEST}
 
 
 def render_card(
@@ -19,7 +22,9 @@ def render_card(
     show_thinking: bool = True,
     show_tools: bool = True,
     show_footer: bool = True,
-    footer_style: str = FOOTER_STYLE_COMPACT,
+    footer_style: str = FOOTER_STYLE_SMALL,
+    tool_limit: int = 5,
+    tool_range: str = TOOL_RANGE_LATEST,
 ) -> str:
     """
     渲染飞书卡片 JSON
@@ -29,7 +34,9 @@ def render_card(
         show_thinking: 是否显示思考过程
         show_tools: 是否显示工具调用
         show_footer: 是否显示统计信息
-        footer_style: 统计信息样式，compact 使用 V2 普通文本 notation 小字号，normal 使用普通文本块
+        footer_style: 统计信息样式，small 使用 notation 小字号，md 使用 lark_md 灰字
+        tool_limit: 最多显示几个工具调用
+        tool_range: latest 显示最新调用，earliest 显示最早调用
 
     Returns:
         飞书卡片 JSON 字符串
@@ -38,6 +45,11 @@ def render_card(
         raise ValueError(
             f"Unsupported footer_style: {footer_style}. "
             f"Expected one of: {', '.join(sorted(SUPPORTED_FOOTER_STYLES))}"
+        )
+    if tool_range not in SUPPORTED_TOOL_RANGES:
+        raise ValueError(
+            f"Unsupported tool_range: {tool_range}. "
+            f"Expected one of: {', '.join(sorted(SUPPORTED_TOOL_RANGES))}"
         )
 
     # 状态映射
@@ -98,12 +110,13 @@ def render_card(
         })
 
     # 工具调用历史
-    if show_tools and session.has_tools:
+    tools, hidden_tool_count = _select_tools(session.tools, tool_limit, tool_range)
+    if show_tools and tools:
         card["body"]["elements"].append({
             "tag": "hr"
         })
 
-        tool_content = _render_tool_summary(session)
+        tool_content = _render_tool_summary(tools, hidden_tool_count)
         card["body"]["elements"].append({
             "tag": "div",
             "text": {
@@ -120,7 +133,7 @@ def render_card(
 
 
 def _render_footer(session: CardSession, footer_style: str) -> Dict:
-    if footer_style == FOOTER_STYLE_NORMAL:
+    if footer_style == FOOTER_STYLE_MD:
         return {
             "tag": "div",
             "text": {
@@ -165,7 +178,16 @@ def _get_status_info(session: CardSession) -> Dict[str, str]:
     return status_map.get(session.status, status_map["thinking"])
 
 
-def _render_tool_summary(session: CardSession) -> str:
+def _select_tools(tools, limit: int, tool_range: str):
+    limit = int(limit)
+    if limit <= 0:
+        return [], 0
+    if tool_range == TOOL_RANGE_EARLIEST:
+        return tools[:limit], max(len(tools) - limit, 0)
+    return tools[-limit:], max(len(tools) - limit, 0)
+
+
+def _render_tool_summary(tools, hidden_tool_count: int) -> str:
     """
     渲染工具调用摘要
 
@@ -174,20 +196,9 @@ def _render_tool_summary(session: CardSession) -> str:
     """
     lines = ["**🔧 工具调用：**\n"]
 
-    for i, tool in enumerate(session.tools, 1):
-        status_emoji = {
-            "running": "⏳",
-            "completed": "✓",
-            "failed": "✗"
-        }.get(tool.status, "?")
-
-        lines.append(f"{i}. {status_emoji} `{tool.name}`")
-
-        # 如果有结果，显示简短摘要
-        if tool.result:
-            result_preview = tool.result[:50]
-            if len(tool.result) > 50:
-                result_preview += "..."
-            lines.append(f"   *→ {result_preview}*")
+    for i, tool in enumerate(tools, 1):
+        lines.append(f"{i}. `{tool.name}`")
+    if hidden_tool_count:
+        lines.append(f"+{hidden_tool_count}")
 
     return "\n".join(lines)

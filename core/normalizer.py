@@ -80,18 +80,3 @@ class StreamingTextNormalizer:
         text = text.replace('﻿', '')
 
         return text
-
-
-def normalize_stream_text(text: str) -> str:
-    """
-    一次性归一化文本（用于终态文本）
-
-    Args:
-        text: 输入文本
-
-    Returns:
-        归一化后的文本
-    """
-    normalizer = StreamingTextNormalizer()
-    normalizer.buffer = text
-    return normalizer.finalize()

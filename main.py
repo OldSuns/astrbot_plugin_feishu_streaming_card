@@ -27,12 +27,6 @@ def _optional_hook(name: str):
     return decorator
 
 
-class _NoopRateLimiter:
-    """兼容旧测试/外部访问；主链路不再使用节流。"""
-
-    async def should_update(self, key: str) -> bool:
-        return True
-
 try:
     # AstrBot 正常按插件包加载时走这里，模块名形如：
     # astrbot_plugin_feishu_streaming_card.core.patch
@@ -96,7 +90,7 @@ except ImportError:
     "astrbot_plugin_feishu_streaming_card",
     "AstrBot Contributors",
     "将 LLM 流式输出渲染为持续更新的飞书卡片",
-    "v0.2.0"
+    "v0.2.2"
 )
 class FeishuStreamingCardPlugin(Star):
     """飞书流式卡片插件"""
@@ -112,7 +106,6 @@ class FeishuStreamingCardPlugin(Star):
         )
         self.pending_tools: Dict[str, list[ToolCall]] = {}
         self.pending_stats: Dict[str, Dict[str, Any]] = {}
-        self.rate_limiter = _NoopRateLimiter()
 
         # 并发控制：per-session 锁
         self.session_locks: Dict[str, asyncio.Lock] = {}
@@ -203,15 +196,6 @@ class FeishuStreamingCardPlugin(Star):
             return await self._maybe_await(async_method(request))
 
         method = getattr(message_api, method_name)
-        return await self._maybe_await(method(request))
-
-    async def _call_lark_api(self, api_obj, method_name: str, request):
-        """调用 lark-oapi API，优先使用异步 a* 方法。"""
-        async_method = getattr(api_obj, f"a{method_name}", None)
-        if async_method is not None:
-            return await self._maybe_await(async_method(request))
-
-        method = getattr(api_obj, method_name)
         return await self._maybe_await(method(request))
 
     @staticmethod
@@ -307,7 +291,7 @@ class FeishuStreamingCardPlugin(Star):
 
             # 完成标记
             session.status = "completed"
-            await self._update_card(event, session, force=True)
+            await self._update_card(event, session)
             success = True
 
             if self.debug_mode:
@@ -325,7 +309,7 @@ class FeishuStreamingCardPlugin(Star):
             if 'session' in locals() and session:
                 session.status = "failed"
                 try:
-                    await self._update_card(event, session, force=True)
+                    await self._update_card(event, session)
                 except Exception:
                     pass
 
@@ -359,9 +343,7 @@ class FeishuStreamingCardPlugin(Star):
             # 累积文本
             session.answer_text = normalizer.feed(chunk_text)
 
-            # 兼容旧单元测试保留本方法，但主链路已不再实时更新卡片。
-            if hasattr(self, 'rate_limiter'):
-                await self._update_card(event, session)
+            await self._update_card(event, session)
 
         # 最终归一化
         session.answer_text = normalizer.finalize()
@@ -421,14 +403,13 @@ class FeishuStreamingCardPlugin(Star):
 
         return result
 
-    async def _update_card(self, event, session: CardSession, force: bool = False):
+    async def _update_card(self, event, session: CardSession):
         """
         更新卡片（带并发控制）
 
         Args:
             event: LarkMessageEvent 实例
             session: 卡片会话
-            force: 是否强制更新（忽略节流）
         """
         if not session.feishu_message_id or not session.card_id:
             return
@@ -446,14 +427,15 @@ class FeishuStreamingCardPlugin(Star):
                 show_thinking=self.config.get("show_thinking", True),
                 show_tools=self.config.get("show_tools", True),
                 show_footer=self.config.get("show_footer", True),
-                footer_style=self.config.get("footer_style", "compact"),
+                footer_style=self.config.get("footer_style", "small"),
+                tool_limit=self.config.get("tool_limit", 5),
+                tool_range=self.config.get("tool_range", "latest"),
             )
 
             # 调用飞书 API
             lark_client = event.bot
 
             try:
-                import lark_oapi as lark
                 from lark_oapi.api.im.v1 import PatchMessageRequest, PatchMessageRequestBody
 
                 request = PatchMessageRequest.builder() \
@@ -687,7 +669,7 @@ class FeishuStreamingCardPlugin(Star):
 
             if session.is_terminal and session.feishu_message_id:
                 try:
-                    await self._update_card(event, session, force=True)
+                    await self._update_card(event, session)
                 except Exception as e:
                     logger.error(f"[飞书流式卡片] 刷新统计信息失败: {e}")
         else:
@@ -707,7 +689,7 @@ class FeishuStreamingCardPlugin(Star):
             self._merge_response_tool_calls(event, resp, session)
             if session.is_terminal and session.feishu_message_id:
                 try:
-                    await self._update_card(event, session, force=True)
+                    await self._update_card(event, session)
                 except Exception as e:
                     logger.error(f"[飞书流式卡片] 刷新 Agent 统计失败: {e}")
         else:
@@ -732,7 +714,7 @@ class FeishuStreamingCardPlugin(Star):
 
             # 立即更新卡片显示工具调用
             try:
-                await self._update_card(event, session, force=True)
+                await self._update_card(event, session)
             except Exception as e:
                 logger.error(f"[飞书流式卡片] 更新工具状态失败: {e}")
         else:
@@ -762,7 +744,7 @@ class FeishuStreamingCardPlugin(Star):
 
             if session.feishu_message_id:
                 try:
-                    await self._update_card(event, session, force=True)
+                    await self._update_card(event, session)
                 except Exception as e:
                     logger.error(f"[飞书流式卡片] 刷新工具状态失败: {e}")
         else:

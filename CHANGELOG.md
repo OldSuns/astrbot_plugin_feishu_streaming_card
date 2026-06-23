@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-06-23
+
+### Added
+- 添加 `tool_limit` 和 `tool_range` 配置，控制显示最新或最早的工具调用数量。
+
+### Changed
+- 工具调用历史只显示工具名称，不再显示参数、状态或结果摘要。
+- 超出 `tool_limit` 的工具调用以 `+n` 计数显示，不展开具体内容。
+- 统计信息样式从 `compact`/`normal` 重命名为更贴近真实渲染的 `small`/`md`。
+
+### Removed
+- 移除旧节流器和未使用的兼容壳，主链路直接按终态/工具状态更新卡片。
+- 移除未使用的渲染导出、会话字段和开发依赖，减少维护面。
+
 ## [0.2.0] - 2026-06-23
 
 ### Fixed

@@ -5,13 +5,13 @@
 
 将 AstrBot 的 LLM 流式输出渲染为持续更新的飞书卡片，提供更好的用户体验。
 
-当前版本：`v0.2.0`
+当前版本：`v0.2.2`
 
 ## 功能特性
 
 - **流式卡片更新**：将 LLM 流式输出渲染为持续更新的飞书卡片
 - **思考过程可视化**：展示 LLM 的推理过程（可选）
-- **工具调用跟踪**：通过 AstrBot LLM/tool 生命周期 hook 显示工具调用状态和结果
+- **工具调用跟踪**：通过 AstrBot LLM/tool 生命周期 hook 显示工具名称
 - **统计信息展示**：显示耗时、模型、token 消耗等元数据，兼容 AstrBot `TokenUsage`
 - **并发控制**：per-session 锁机制，避免并发更新导致的内容冲突
 - **安全降级**：异常时自动回退到原生流式输出
@@ -57,8 +57,10 @@ pip install -r requirements.txt
   "enabled": true,              // 是否启用插件
   "show_thinking": true,        // 是否显示思考过程
   "show_tools": true,           // 是否显示工具调用
+  "tool_limit": 5,              // 最多显示几个工具调用
+  "tool_range": "latest",       // 工具调用范围：latest/earliest
   "show_footer": true,          // 是否显示统计信息
-  "footer_style": "compact",    // 统计信息样式：compact/normal
+  "footer_style": "small",      // 统计信息样式：small/md
   "max_sessions": 25,           // 最大会话数
   "session_ttl": 3600,          // 会话超时时间（秒）
   "uninstall_patch": false,     // 卸载 Monkey Patch
@@ -73,8 +75,10 @@ pip install -r requirements.txt
 | `enabled` | boolean | `true` | 是否启用飞书流式卡片功能 |
 | `show_thinking` | boolean | `true` | 是否在卡片中显示 LLM 的思考过程 |
 | `show_tools` | boolean | `true` | 是否在卡片中显示工具调用历史 |
+| `tool_limit` | integer | `5` | 最多显示几个工具调用，超出显示 `+n`，`0` 表示不显示 |
+| `tool_range` | string | `latest` | 工具调用显示范围：`latest` 最新，`earliest` 最早 |
 | `show_footer` | boolean | `true` | 是否显示耗时、模型、token 等统计信息 |
-| `footer_style` | string | `compact` | 底部统计信息样式：`compact` 使用 V2 普通文本 notation 小字号，`normal` 使用普通文本块 |
+| `footer_style` | string | `small` | 底部统计信息样式：`small` 使用 V2 普通文本 notation 小字号，`md` 使用 lark_md 灰字 |
 | `max_sessions` | integer | `25` | 内存中保持的最大会话数，超过后自动清理最旧的会话 |
 | `session_ttl` | integer | `3600` | 会话在内存中保持的最长时间（秒），超时后自动清理 |
 | `uninstall_patch` | boolean | `false` | 保存配置后卸载 Monkey Patch，用于不重启恢复飞书原生流式输出 |

@@ -39,33 +39,6 @@ def summary_content(session: CardSession, fallback: str) -> str:
     return (session.answer_text or "").strip() or fallback
 
 
-def build_streaming_card(session: CardSession) -> dict:
-    """构建 CardKit streaming 初始卡片。"""
-    subtitle, template = status_tuple(session)
-
-    return {
-        "schema": "2.0",
-        "config": {
-            "streaming_mode": True,
-            "update_multi": True,
-            "summary": {"content": summary_content(session, subtitle)},
-        },
-        "header": {
-            "template": template,
-            "title": {"tag": "plain_text", "content": subtitle},
-        },
-        "body": {
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "content": session.answer_text or "",
-                    "element_id": "markdown_1",
-                }
-            ]
-        },
-    }
-
-
 def apply_card_header(card: dict, session: CardSession) -> dict:
     """给原生 CardKit 初始卡片注入插件标题区域。"""
     subtitle, template = status_tuple(session)
