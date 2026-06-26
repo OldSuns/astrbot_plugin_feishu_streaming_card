@@ -53,7 +53,22 @@ class CardSession:
     @property
     def footer_text(self) -> str:
         """Footer 统计文本"""
-        return f"{self.duration:.1f}s · {self.model} · ↑{self.input_tokens} ↓{self.output_tokens}"
+        duration = self.duration
+        tps = self._tps_for_duration(duration)
+        return f"{duration:.1f}s · {self.model} · ↑{self.input_tokens} ↓{self.output_tokens} · {tps:.1f} tps"
+
+    @property
+    def tps(self) -> float:
+        """输出 token 生成速度。"""
+        duration = self.duration
+        if duration <= 0 or self.output_tokens <= 0:
+            return 0.0
+        return self.output_tokens / duration
+
+    def _tps_for_duration(self, duration: float) -> float:
+        if duration <= 0 or self.output_tokens <= 0:
+            return 0.0
+        return self.output_tokens / duration
 
     @property
     def has_tools(self) -> bool:
