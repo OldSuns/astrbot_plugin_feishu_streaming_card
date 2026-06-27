@@ -100,7 +100,7 @@ except ImportError:
     "astrbot_plugin_feishu_streaming_card",
     "AstrBot Contributors",
     "将 LLM 流式输出渲染为持续更新的飞书卡片",
-    "v0.2.3"
+    "v0.2.4"
 )
 class FeishuStreamingCardPlugin(Star):
     """飞书流式卡片插件"""

@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.4] - 2026-06-27
+
+### Fixed
+- 修复输出完成后卡片正文改用 `lark_md` 文本组件渲染，导致分隔符 `---`、图片、表格、有序/无序列表等块级 Markdown 元素被飞书丢弃的问题。正文、占位和工具调用摘要改用独立 `markdown` 组件，与流式过程的渲染保持一致。
+
 ## [0.2.3] - 2026-06-23
 
 ### Added

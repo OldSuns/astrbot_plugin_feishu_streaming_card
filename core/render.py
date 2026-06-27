@@ -86,22 +86,10 @@ def render_card(
 
     # 主内容（回答）
     if session.answer_text:
-        card["body"]["elements"].append({
-            "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": session.answer_text
-            }
-        })
+        card["body"]["elements"].append(_markdown_element(session.answer_text))
     elif not session.thinking_text:
         # 如果没有思考也没有回答，显示加载中
-        card["body"]["elements"].append({
-            "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": "*正在处理中...*"
-            }
-        })
+        card["body"]["elements"].append(_markdown_element("*正在处理中...*"))
 
     # 工具调用历史
     tools, hidden_tool_count = _select_tools(session.tools, tool_limit, tool_range)
@@ -111,19 +99,25 @@ def render_card(
         })
 
         tool_content = _render_tool_summary(tools, hidden_tool_count)
-        card["body"]["elements"].append({
-            "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": tool_content
-            }
-        })
+        card["body"]["elements"].append(_markdown_element(tool_content))
 
     # Footer 统计信息（完成状态）
     if show_footer and session.is_terminal:
         card["body"]["elements"].append(_render_footer(session, footer_style))
 
     return json.dumps(card, ensure_ascii=False)
+
+
+def _markdown_element(content: str) -> Dict:
+    """正文/占位/工具摘要统一用独立 markdown 组件渲染。
+
+    飞书 lark_md 文本组件不支持 --- 分割线、图片、表格等块级元素，会在终态
+    卡片里被吞掉；独立 markdown 组件支持完整 markdown 语法（与流式正文一致）。
+    """
+    return {
+        "tag": "markdown",
+        "content": content,
+    }
 
 
 def _render_footer(session: CardSession, footer_style: str) -> Dict:

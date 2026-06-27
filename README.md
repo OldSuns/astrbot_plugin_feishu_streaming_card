@@ -7,7 +7,7 @@
 
 将 AstrBot 的 LLM 流式输出渲染为持续更新的飞书卡片，提供更好的用户体验。
 
-当前版本：`v0.2.3`
+当前版本：`v0.2.4`
 
 <img width="400" alt="sample" src="assets/sample.jpg" />
 
